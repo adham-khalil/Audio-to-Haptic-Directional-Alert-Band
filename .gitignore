@@ -1,0 +1,14 @@
+# ESP-IDF build directory
+build/
+
+# Local configuration files
+sdkconfig
+sdkconfig.old
+
+# Python bytecode and virtual environments
+__pycache__/
+node_modules/
+.pytest_cache/
+
+# VS Code specific files (optional)
+.vscode/
