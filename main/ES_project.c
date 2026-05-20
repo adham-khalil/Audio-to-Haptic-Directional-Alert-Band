@@ -16,9 +16,11 @@
 #define SIREN_LOW_HZ   500.0f
 #define SIREN_HIGH_HZ  4000.0f
 #define SIREN_THRESHOLD 100000.0f  
-#define HISTORY_SIZE 10
+#define HISTORY_SIZE 60
 
 #define NUM_CHANNELS 3
+
+#define MIN_SIREN_SWEEP 200.0f
 
 static float freq_history[HISTORY_SIZE] = {0};
 static int history_index = 0;
@@ -26,6 +28,7 @@ static int history_index = 0;
 
 
 static adc_continuous_handle_t adc_handle;
+
 static float fft_left[FFT_SIZE * 2];
 static float fft_front[FFT_SIZE * 2];
 static float fft_right[FFT_SIZE * 2];
@@ -50,12 +53,22 @@ bool detect_siren(float dominant_freq, float magnitude) {
 
     // count how many recent frames were in siren range
     int count = 0;
+    float min_f = SIREN_HIGH_HZ;
+    float max_f = SIREN_LOW_HZ;
     for (int i = 0; i < HISTORY_SIZE; i++) {
-        if (freq_history[i] > 0) count++;
+        if (freq_history[i] > 0){
+            count++;
+            if (freq_history[i] < min_f) min_f = freq_history[i];
+            if (freq_history[i] > max_f) max_f = freq_history[i];
+        }
+         
+
     }
 
-    // if 7 out of last 10 frames had siren-range frequency → alarm
-    return count >= 7;
+    bool has_enough_frames = (count >= 30);
+    bool is_shifting = ((max_f - min_f) >= MIN_SIREN_SWEEP);
+
+    return has_enough_frames && is_shifting;
 }
 
 int dominant_bin_with_mag(float *fft_data, float *out_magnitude) {
@@ -150,7 +163,7 @@ void app_main(void) {
                         fi++;
                     } else if (p->type1.channel == MIC_RIGHT) {
                         fft_right[ri * 2]     = p->type1.data;
-                        fft_right[ri * 2 + 1] false= 0;
+                        fft_right[ri * 2 + 1] = 0;
                         ri++;
                     
                     }
