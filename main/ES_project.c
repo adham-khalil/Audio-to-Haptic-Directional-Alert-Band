@@ -29,9 +29,7 @@
 
 #define MIN_SIREN_SWEEP 200.0f
 
-#define CAL_LEFT   1.0f
-#define CAL_FRONT  1.0f  
-#define CAL_RIGHT  1.0f
+
 
 typedef struct {
     float freq_history[HISTORY_SIZE];
@@ -113,16 +111,23 @@ bool is_in_siren_range(float freq, float magnitude) {
            && (magnitude > SIREN_THRESHOLD);
 }
 
-bool detect_siren(float dominant_freq, float magnitude, channel_history_t *hist) {
-    // Only log if in range and loud enough
-    if (!is_in_siren_range(dominant_freq, magnitude)) {
+bool detect_siren(float *peak_mags, int *peak_bins, channel_history_t *hist) {
+    float dominant_freq = peak_bins[0] * (20000.0f / FFT_SIZE);
+    float dominant_mag = peak_mags[0];
+
+    // Calculate Harmonic Richness Ratio (Peak 2 vs Peak 1)
+    float harmonic_ratio = (dominant_mag > 0) ? (peak_mags[1] / dominant_mag) : 0.0f;
+
+    // Boundary conditions - filters out flat single-frequency tones (harmonic_ratio < 0.001f)
+    if (dominant_freq < SIREN_LOW_HZ || dominant_freq > SIREN_HIGH_HZ || 
+        dominant_mag < SIREN_THRESHOLD || harmonic_ratio < 0.001f) {
         hist->freq_history[hist->history_index] = 0;
     } else {
         hist->freq_history[hist->history_index] = dominant_freq;
     }
     hist->history_index = (hist->history_index + 1) % HISTORY_SIZE;
 
-    // Count how many recent frames were in siren range
+    // Count recent valid sweep frames
     int count = 0;
     float min_f = SIREN_HIGH_HZ;
     float max_f = SIREN_LOW_HZ;
@@ -134,26 +139,32 @@ bool detect_siren(float dominant_freq, float magnitude, channel_history_t *hist)
         }
     }
 
-    bool has_enough_frames = (count >= 12);
-    bool is_shifting = ((max_f - min_f) >= MIN_SIREN_SWEEP);
-
-    return has_enough_frames && is_shifting;
+    return (count >= 12) && ((max_f - min_f) >= MIN_SIREN_SWEEP);
 }
+void extract_top_peaks(float *fft_data, float *peak_mags, int *peak_bins) {
+    for (int k = 0; k < 3; k++) {
+        peak_mags[k] = -1.0f; // Initialized to -1 so any real analog reading overrides it
+        peak_bins[k] = 0;
+    }
 
-int dominant_bin_with_mag(float *fft_data, float *out_magnitude) {
-    float max_mag = 0;
-    int max_bin = 0;
+    // Loop through the positive frequency bins (skipping DC offset at index 0)
     for (int i = 1; i < FFT_SIZE / 2; i++) {
         float re = fft_data[2 * i];
         float im = fft_data[2 * i + 1];
         float mag = re * re + im * im;
-        if (mag > max_mag) {
-            max_mag = mag;
-            max_bin = i;
+
+        // Cascade sorting down the top 3 spots
+        if (mag > peak_mags[0]) {
+            peak_mags[2] = peak_mags[1]; peak_bins[2] = peak_bins[1];
+            peak_mags[1] = peak_mags[0]; peak_bins[1] = peak_bins[0];
+            peak_mags[0] = mag;          peak_bins[0] = i;
+        } else if (mag > peak_mags[1]) {
+            peak_mags[2] = peak_mags[1]; peak_bins[2] = peak_bins[1];
+            peak_mags[1] = mag;          peak_bins[1] = i;
+        } else if (mag > peak_mags[2]) {
+            peak_mags[2] = mag;          peak_bins[2] = i;
         }
     }
-    *out_magnitude = max_mag;
-    return max_bin;
 }
 
 
@@ -251,29 +262,28 @@ void app_main(void) {
                 dsps_bit_rev_fc32(fft_left,  FFT_SIZE);
                 dsps_bit_rev_fc32(fft_front, FFT_SIZE);
                 dsps_bit_rev_fc32(fft_right, FFT_SIZE);
+                float mags_l[3], mags_f[3], mags_r[3];
+                int bins_l[3],  bins_f[3],  bins_r[3];
 
-                float mag_left, mag_front, mag_right;
+                extract_top_peaks(fft_left,  mags_l, bins_l);
+                extract_top_peaks(fft_front, mags_f, bins_f);
+                extract_top_peaks(fft_right, mags_r, bins_r);
 
-                int dom_left  = dominant_bin_with_mag(fft_left,  &mag_left);
-                int dom_front = dominant_bin_with_mag(fft_front, &mag_front);
-                int dom_right = dominant_bin_with_mag(fft_right, &mag_right);
+                // Apply directional calibration multipliers onto primary dominant peaks
+                float mag_left  = mags_l[0] ;
+                float mag_front = mags_f[0] ;
+                float mag_right = mags_r[0] ;
 
-                float freq_left  = dom_left  * (20000.0f / FFT_SIZE);
-                float freq_front = dom_front * (20000.0f / FFT_SIZE);
-                float freq_right = dom_right * (20000.0f / FFT_SIZE);
-
-                mag_left *= CAL_LEFT;
-                mag_right *= CAL_RIGHT;
-                mag_front *= CAL_FRONT;
-
+                float freq_left  = bins_l[0] * (20000.0f / FFT_SIZE);
+                float freq_front = bins_f[0] * (20000.0f / FFT_SIZE);
+                float freq_right = bins_r[0] * (20000.0f / FFT_SIZE);
 
                 printf("Left: %.1f Hz (%.0f) | Front: %.1f Hz (%.0f) | Right: %.1f Hz (%.0f)\n",
                     freq_left, mag_left, freq_front, mag_front, freq_right, mag_right);
-
             
-                bool siren_left  = detect_siren(freq_left,  mag_left,  &hist_left);
-                bool siren_front = detect_siren(freq_front, mag_front, &hist_front);
-                bool siren_right = detect_siren(freq_right, mag_right, &hist_right);
+                bool siren_left  = detect_siren(mags_l, bins_l, &hist_left);
+                bool siren_front = detect_siren(mags_f, bins_f, &hist_front);
+                bool siren_right = detect_siren(mags_r, bins_r, &hist_right);
 
 
                 if (siren_left || siren_front || siren_right) {
